@@ -11,8 +11,10 @@
 namespace flutter {
 namespace testing {
 
-EmbedderTestCompositor::EmbedderTestCompositor(sk_sp<GrContext> context)
-    : context_(context) {
+EmbedderTestCompositor::EmbedderTestCompositor(SkISize surface_size,
+                                               sk_sp<GrContext> context)
+    : surface_size_(surface_size), context_(context) {
+  FML_CHECK(!surface_size_.isEmpty()) << "Surface size must not be empty";
   FML_CHECK(context_);
 }
 
@@ -20,6 +22,14 @@ EmbedderTestCompositor::~EmbedderTestCompositor() = default;
 
 void EmbedderTestCompositor::SetRenderTargetType(RenderTargetType type) {
   type_ = type;
+}
+
+static void InvokeAllCallbacks(const std::vector<fml::closure>& callbacks) {
+  for (const auto& callback : callbacks) {
+    if (callback) {
+      callback();
+    }
+  }
 }
 
 bool EmbedderTestCompositor::CreateBackingStore(
@@ -41,7 +51,8 @@ bool EmbedderTestCompositor::CreateBackingStore(
       return false;
   }
   if (success) {
-    backing_stores_count_++;
+    backing_stores_created_++;
+    InvokeAllCallbacks(on_create_render_target_callbacks_);
   }
   return success;
 }
@@ -52,7 +63,8 @@ bool EmbedderTestCompositor::CollectBackingStore(
   // stores. Our user_data is just the canvas from that backing store and does
   // not need to be explicitly collected. Embedders might have some other state
   // they want to collect though.
-  backing_stores_count_--;
+  backing_stores_collected_++;
+  InvokeAllCallbacks(on_collect_render_target_callbacks_);
   return true;
 }
 
@@ -61,8 +73,7 @@ bool EmbedderTestCompositor::UpdateOffscrenComposition(
     size_t layers_count) {
   last_composition_ = nullptr;
 
-  auto surface_size = SkISize::Make(800, 600);
-  const auto image_info = SkImageInfo::MakeN32Premul(surface_size);
+  const auto image_info = SkImageInfo::MakeN32Premul(surface_size_);
 
   auto surface = type_ == RenderTargetType::kSoftwareBuffer
                      ? SkSurface::MakeRaster(image_info)
@@ -111,15 +122,22 @@ bool EmbedderTestCompositor::UpdateOffscrenComposition(
         break;
     };
 
+    // If the layer is not a platform view but the engine did not specify an
+    // image for the backing store, it is an error.
     if (!layer_image && layer->type != kFlutterLayerContentTypePlatformView) {
       FML_LOG(ERROR) << "Could not snapshot layer in test compositor: "
                      << *layer;
       return false;
     }
 
-    // The image rendered by Flutter already has the correct offset and
-    // transformation applied. The layers offset is meant for the platform.
-    canvas->drawImage(layer_image.get(), canvas_offset.x(), canvas_offset.y());
+    // The test could have just specified no contents to be rendered in place of
+    // a platform view. This is not an error.
+    if (layer_image) {
+      // The image rendered by Flutter already has the correct offset and
+      // transformation applied. The layers offset is meant for the platform.
+      canvas->drawImage(layer_image.get(), canvas_offset.x(),
+                        canvas_offset.y());
+    }
   }
 
   last_composition_ = surface->makeImageSnapshot();
@@ -154,12 +172,15 @@ bool EmbedderTestCompositor::Present(const FlutterLayer** layers,
 
   // If the test has asked to access the layers and renderers being presented.
   // Access the same and present it to the test for its test assertions.
-  if (next_present_callback_) {
-    auto callback = next_present_callback_;
-    next_present_callback_ = nullptr;
+  if (present_callback_) {
+    auto callback = present_callback_;
+    if (present_callback_is_one_shot_) {
+      present_callback_ = nullptr;
+    }
     callback(layers, layers_count);
   }
 
+  InvokeAllCallbacks(on_present_callbacks_);
   return true;
 }
 
@@ -169,16 +190,15 @@ bool EmbedderTestCompositor::CreateFramebufferRenderSurface(
   const auto image_info =
       SkImageInfo::MakeN32Premul(config->size.width, config->size.height);
 
-  auto surface =
-      SkSurface::MakeRenderTarget(context_.get(),            // context
-                                  SkBudgeted::kNo,           // budgeted
-                                  image_info,                // image info
-                                  1,                         // sample count
-                                  kTopLeft_GrSurfaceOrigin,  // surface origin
-                                  nullptr,  // surface properties
-                                  false     // mipmaps
-
-      );
+  auto surface = SkSurface::MakeRenderTarget(
+      context_.get(),               // context
+      SkBudgeted::kNo,              // budgeted
+      image_info,                   // image info
+      1,                            // sample count
+      kBottomLeft_GrSurfaceOrigin,  // surface origin
+      nullptr,                      // surface properties
+      false                         // mipmaps
+  );
 
   if (!surface) {
     FML_LOG(ERROR) << "Could not create render target for compositor layer.";
@@ -219,16 +239,16 @@ bool EmbedderTestCompositor::CreateTextureRenderSurface(
   const auto image_info =
       SkImageInfo::MakeN32Premul(config->size.width, config->size.height);
 
-  auto surface =
-      SkSurface::MakeRenderTarget(context_.get(),            // context
-                                  SkBudgeted::kNo,           // budgeted
-                                  image_info,                // image info
-                                  1,                         // sample count
-                                  kTopLeft_GrSurfaceOrigin,  // surface origin
-                                  nullptr,  // surface properties
-                                  false     // mipmaps
+  auto surface = SkSurface::MakeRenderTarget(
+      context_.get(),               // context
+      SkBudgeted::kNo,              // budgeted
+      image_info,                   // image info
+      1,                            // sample count
+      kBottomLeft_GrSurfaceOrigin,  // surface origin
+      nullptr,                      // surface properties
+      false                         // mipmaps
 
-      );
+  );
 
   if (!surface) {
     FML_LOG(ERROR) << "Could not create render target for compositor layer.";
@@ -298,24 +318,54 @@ bool EmbedderTestCompositor::CreateSoftwareRenderSurface(
 }
 
 void EmbedderTestCompositor::SetNextPresentCallback(
-    PresentCallback next_present_callback) {
-  FML_CHECK(!next_present_callback_);
-  next_present_callback_ = next_present_callback;
+    const PresentCallback& next_present_callback) {
+  SetPresentCallback(next_present_callback, true);
+}
+
+void EmbedderTestCompositor::SetPresentCallback(
+    const PresentCallback& present_callback,
+    bool one_shot) {
+  FML_CHECK(!present_callback_);
+  present_callback_ = present_callback;
+  present_callback_is_one_shot_ = one_shot;
 }
 
 void EmbedderTestCompositor::SetNextSceneCallback(
-    NextSceneCallback next_scene_callback) {
+    const NextSceneCallback& next_scene_callback) {
   FML_CHECK(!next_scene_callback_);
   next_scene_callback_ = next_scene_callback;
 }
 
 void EmbedderTestCompositor::SetPlatformViewRendererCallback(
-    PlatformViewRendererCallback callback) {
+    const PlatformViewRendererCallback& callback) {
   platform_view_renderer_callback_ = callback;
 }
 
-size_t EmbedderTestCompositor::GetBackingStoresCount() const {
-  return backing_stores_count_;
+size_t EmbedderTestCompositor::GetPendingBackingStoresCount() const {
+  FML_CHECK(backing_stores_created_ >= backing_stores_collected_);
+  return backing_stores_created_ - backing_stores_collected_;
+}
+
+size_t EmbedderTestCompositor::GetBackingStoresCreatedCount() const {
+  return backing_stores_created_;
+}
+
+size_t EmbedderTestCompositor::GetBackingStoresCollectedCount() const {
+  return backing_stores_collected_;
+}
+
+void EmbedderTestCompositor::AddOnCreateRenderTargetCallback(
+    fml::closure callback) {
+  on_create_render_target_callbacks_.push_back(callback);
+}
+
+void EmbedderTestCompositor::AddOnCollectRenderTargetCallback(
+    fml::closure callback) {
+  on_collect_render_target_callbacks_.push_back(callback);
+}
+
+void EmbedderTestCompositor::AddOnPresentCallback(fml::closure callback) {
+  on_present_callbacks_.push_back(callback);
 }
 
 }  // namespace testing

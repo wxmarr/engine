@@ -2,14 +2,14 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef TOPAZ_RUNTIME_DART_RUNNER_DART_RUNNER_H_
-#define TOPAZ_RUNTIME_DART_RUNNER_DART_RUNNER_H_
+#ifndef FLUTTER_SHELL_PLATFORM_FUCHSIA_DART_RUNNER_DART_RUNNER_H_
+#define FLUTTER_SHELL_PLATFORM_FUCHSIA_DART_RUNNER_DART_RUNNER_H_
 
 #include <fuchsia/sys/cpp/fidl.h>
 #include <lib/fidl/cpp/binding_set.h>
 #include <lib/sys/cpp/component_context.h>
 
-#include "mapped_resource.h"
+#include "runtime/dart/utils/mapped_resource.h"
 
 namespace dart_runner {
 
@@ -30,8 +30,8 @@ class DartRunner : public fuchsia::sys::Runner {
   fidl::BindingSet<fuchsia::sys::Runner> bindings_;
 
 #if !defined(AOT_RUNTIME)
-  MappedResource vm_snapshot_data_;
-  MappedResource vm_snapshot_instructions_;
+  dart_utils::MappedResource vm_snapshot_data_;
+  dart_utils::MappedResource vm_snapshot_instructions_;
 #endif
 
   // Disallow copy and assignment.
@@ -41,4 +41,4 @@ class DartRunner : public fuchsia::sys::Runner {
 
 }  // namespace dart_runner
 
-#endif  // TOPAZ_RUNTIME_DART_RUNNER_DART_RUNNER_H_
+#endif  // FLUTTER_SHELL_PLATFORM_FUCHSIA_DART_RUNNER_DART_RUNNER_H_

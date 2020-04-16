@@ -26,17 +26,23 @@
 #import "flutter/shell/platform/darwin/ios/framework/Source/platform_message_response_darwin.h"
 #import "flutter/shell/platform/darwin/ios/ios_surface.h"
 #import "flutter/shell/platform/darwin/ios/platform_view_ios.h"
+#include "flutter/shell/platform/darwin/ios/rendering_api_selection.h"
+
+NSString* const FlutterDefaultDartEntrypoint = nil;
+
+@interface FlutterEngineRegistrar : NSObject <FlutterPluginRegistrar>
+@property(nonatomic, assign) FlutterEngine* flutterEngine;
+- (instancetype)initWithPlugin:(NSString*)pluginKey flutterEngine:(FlutterEngine*)flutterEngine;
+@end
 
 @interface FlutterEngine () <FlutterTextInputDelegate, FlutterBinaryMessenger>
 // Maintains a dictionary of plugin names that have registered with the engine.  Used by
 // FlutterEngineRegistrar to implement a FlutterPluginRegistrar.
 @property(nonatomic, readonly) NSMutableDictionary* pluginPublications;
+@property(nonatomic, readonly) NSMutableDictionary<NSString*, FlutterEngineRegistrar*>* registrars;
 
 @property(nonatomic, readwrite, copy) NSString* isolateId;
-@end
-
-@interface FlutterEngineRegistrar : NSObject <FlutterPluginRegistrar>
-- (instancetype)initWithPlugin:(NSString*)pluginKey flutterEngine:(FlutterEngine*)flutterEngine;
+@property(nonatomic, retain) id<NSObject> flutterViewControllerWillDeallocObserver;
 @end
 
 @implementation FlutterEngine {
@@ -69,6 +75,10 @@
   FlutterBinaryMessengerRelay* _binaryMessenger;
 }
 
+- (instancetype)initWithName:(NSString*)labelPrefix {
+  return [self initWithName:labelPrefix project:nil allowHeadlessExecution:YES];
+}
+
 - (instancetype)initWithName:(NSString*)labelPrefix project:(FlutterDartProject*)project {
   return [self initWithName:labelPrefix project:project allowHeadlessExecution:YES];
 }
@@ -91,6 +101,7 @@
     _dartProject.reset([project retain]);
 
   _pluginPublications = [NSMutableDictionary new];
+  _registrars = [[NSMutableDictionary alloc] init];
   _platformViewsController.reset(new flutter::FlutterPlatformViewsController());
 
   _binaryMessenger = [[FlutterBinaryMessengerRelay alloc] initWithParent:self];
@@ -101,16 +112,52 @@
                  name:UIApplicationDidReceiveMemoryWarningNotification
                object:nil];
 
+  [center addObserver:self
+             selector:@selector(applicationBecameActive:)
+                 name:UIApplicationDidBecomeActiveNotification
+               object:nil];
+
+  [center addObserver:self
+             selector:@selector(applicationWillResignActive:)
+                 name:UIApplicationWillResignActiveNotification
+               object:nil];
+
+  [center addObserver:self
+             selector:@selector(onLocaleUpdated:)
+                 name:NSCurrentLocaleDidChangeNotification
+               object:nil];
+
   return self;
 }
 
 - (void)dealloc {
+  /// Notify plugins of dealloc.  This should happen first in dealloc since the
+  /// plugins may be talking to things like the binaryMessenger.
+  [_pluginPublications enumerateKeysAndObjectsUsingBlock:^(id key, id object, BOOL* stop) {
+    if ([object respondsToSelector:@selector(detachFromEngineForRegistrar:)]) {
+      NSObject<FlutterPluginRegistrar>* registrar = self.registrars[key];
+      [object detachFromEngineForRegistrar:registrar];
+    }
+  }];
+
+  /// nil out weak references.
+  [_registrars
+      enumerateKeysAndObjectsUsingBlock:^(id key, FlutterEngineRegistrar* registrar, BOOL* stop) {
+        registrar.flutterEngine = nil;
+      }];
+
+  [_labelPrefix release];
   [_pluginPublications release];
+  [_registrars release];
   _binaryMessenger.parent = nil;
   [_binaryMessenger release];
 
   NSNotificationCenter* center = [NSNotificationCenter defaultCenter];
-  [center removeObserver:self name:UIApplicationDidReceiveMemoryWarningNotification object:nil];
+  if (_flutterViewControllerWillDeallocObserver) {
+    [center removeObserver:_flutterViewControllerWillDeallocObserver];
+    [_flutterViewControllerWillDeallocObserver release];
+  }
+  [center removeObserver:self];
 
   [super dealloc];
 }
@@ -153,9 +200,9 @@
   return _shell->GetTaskRunners().GetPlatformTaskRunner();
 }
 
-- (fml::RefPtr<fml::TaskRunner>)GPUTaskRunner {
+- (fml::RefPtr<fml::TaskRunner>)RasterTaskRunner {
   FML_DCHECK(_shell);
-  return _shell->GetTaskRunners().GetGPUTaskRunner();
+  return _shell->GetTaskRunners().GetRasterTaskRunner();
 }
 
 - (void)ensureSemanticsEnabled {
@@ -164,15 +211,51 @@
 
 - (void)setViewController:(FlutterViewController*)viewController {
   FML_DCHECK(self.iosPlatformView);
-  _viewController = [viewController getWeakPtr];
+  _viewController =
+      viewController ? [viewController getWeakPtr] : fml::WeakPtr<FlutterViewController>();
   self.iosPlatformView->SetOwnerViewController(_viewController);
   [self maybeSetupPlatformViewChannels];
+
+  if (viewController) {
+    __block FlutterEngine* blockSelf = self;
+    self.flutterViewControllerWillDeallocObserver =
+        [[NSNotificationCenter defaultCenter] addObserverForName:FlutterViewControllerWillDealloc
+                                                          object:viewController
+                                                           queue:[NSOperationQueue mainQueue]
+                                                      usingBlock:^(NSNotification* note) {
+                                                        [blockSelf notifyViewControllerDeallocated];
+                                                      }];
+  } else {
+    self.flutterViewControllerWillDeallocObserver = nil;
+  }
+}
+
+- (void)attachView {
+  self.iosPlatformView->attachView();
+}
+
+- (void)setFlutterViewControllerWillDeallocObserver:(id<NSObject>)observer {
+  if (observer != _flutterViewControllerWillDeallocObserver) {
+    if (_flutterViewControllerWillDeallocObserver) {
+      [[NSNotificationCenter defaultCenter]
+          removeObserver:_flutterViewControllerWillDeallocObserver];
+      [_flutterViewControllerWillDeallocObserver release];
+    }
+    _flutterViewControllerWillDeallocObserver = [observer retain];
+  }
 }
 
 - (void)notifyViewControllerDeallocated {
+  [[self lifecycleChannel] sendMessage:@"AppLifecycleState.detached"];
   if (!_allowHeadlessExecution) {
     [self destroyContext];
+  } else {
+    flutter::PlatformViewIOS* platform_view = [self iosPlatformView];
+    if (platform_view) {
+      platform_view->SetOwnerViewController({});
+    }
   }
+  _viewController.reset();
 }
 
 - (void)destroyContext {
@@ -242,9 +325,13 @@
 - (void)setupChannels {
   // This will be invoked once the shell is done setting up and the isolate ID
   // for the UI isolate is available.
+  fml::WeakPtr<FlutterEngine> weakSelf = [self getWeakPtr];
   [_binaryMessenger setMessageHandlerOnChannel:@"flutter/isolate"
                           binaryMessageHandler:^(NSData* message, FlutterBinaryReply reply) {
-                            self.isolateId = [[FlutterStringCodec sharedInstance] decode:message];
+                            if (weakSelf) {
+                              weakSelf.get().isolateId =
+                                  [[FlutterStringCodec sharedInstance] decode:message];
+                            }
                           }];
 
   _localizationChannel.reset([[FlutterMethodChannel alloc]
@@ -331,6 +418,7 @@
   static size_t shellCount = 1;
 
   auto settings = [_dartProject.get() settings];
+  auto windowData = [_dartProject.get() defaultWindowData];
 
   if (libraryURI) {
     FML_DCHECK(entrypoint) << "Must specify entrypoint if specifying library";
@@ -345,7 +433,7 @@
   }
 
   const auto threadLabel = [NSString stringWithFormat:@"%@.%zu", _labelPrefix, shellCount++];
-  FML_DLOG(INFO) << "Creating threadHost for " << threadLabel.UTF8String;
+
   // The current thread will be used as the platform thread. Ensure that the message loop is
   // initialized.
   fml::MessageLoop::EnsureInitializedForCurrentThread();
@@ -359,7 +447,8 @@
   // synchronous.
   flutter::Shell::CreateCallback<flutter::PlatformView> on_create_platform_view =
       [](flutter::Shell& shell) {
-        return std::make_unique<flutter::PlatformViewIOS>(shell, shell.GetTaskRunners());
+        return std::make_unique<flutter::PlatformViewIOS>(
+            shell, flutter::GetRenderingAPIForProcess(), shell.GetTaskRunners());
       };
 
   flutter::Shell::CreateCallback<flutter::Rasterizer> on_create_rasterizer =
@@ -378,12 +467,13 @@
 
     flutter::TaskRunners task_runners(threadLabel.UTF8String,                          // label
                                       fml::MessageLoop::GetCurrent().GetTaskRunner(),  // platform
-                                      fml::MessageLoop::GetCurrent().GetTaskRunner(),  // gpu
+                                      fml::MessageLoop::GetCurrent().GetTaskRunner(),  // raster
                                       _threadHost.ui_thread->GetTaskRunner(),          // ui
                                       _threadHost.io_thread->GetTaskRunner()           // io
     );
     // Create the shell. This is a blocking operation.
     _shell = flutter::Shell::Create(std::move(task_runners),  // task runners
+                                    std::move(windowData),    // window data
                                     std::move(settings),      // settings
                                     on_create_platform_view,  // platform view creation
                                     on_create_rasterizer      // rasterzier creation
@@ -391,12 +481,13 @@
   } else {
     flutter::TaskRunners task_runners(threadLabel.UTF8String,                          // label
                                       fml::MessageLoop::GetCurrent().GetTaskRunner(),  // platform
-                                      _threadHost.gpu_thread->GetTaskRunner(),         // gpu
+                                      _threadHost.raster_thread->GetTaskRunner(),      // raster
                                       _threadHost.ui_thread->GetTaskRunner(),          // ui
                                       _threadHost.io_thread->GetTaskRunner()           // io
     );
     // Create the shell. This is a blocking operation.
     _shell = flutter::Shell::Create(std::move(task_runners),  // task runners
+                                    std::move(windowData),    // window data
                                     std::move(settings),      // settings
                                     on_create_platform_view,  // platform view creation
                                     on_create_rasterizer      // rasterzier creation
@@ -408,14 +499,20 @@
                    << entrypoint.UTF8String;
   } else {
     [self setupChannels];
+    [self onLocaleUpdated:nil];
     if (!_platformViewsController) {
       _platformViewsController.reset(new flutter::FlutterPlatformViewsController());
     }
     _publisher.reset([[FlutterObservatoryPublisher alloc] init]);
     [self maybeSetupPlatformViewChannels];
+    _shell->GetIsGpuDisabledSyncSwitch()->SetSwitch(_isGpuDisabled ? true : false);
   }
 
   return _shell != nullptr;
+}
+
+- (BOOL)run {
+  return [self runWithEntrypoint:FlutterDefaultDartEntrypoint libraryURI:nil];
 }
 
 - (BOOL)runWithEntrypoint:(NSString*)entrypoint libraryURI:(NSString*)libraryURI {
@@ -435,6 +532,11 @@
 - (void)updateEditingClient:(int)client withState:(NSDictionary*)state {
   [_textInputChannel.get() invokeMethod:@"TextInputClient.updateEditingState"
                               arguments:@[ @(client), state ]];
+}
+
+- (void)updateEditingClient:(int)client withState:(NSDictionary*)state withTag:(NSString*)tag {
+  [_textInputChannel.get() invokeMethod:@"TextInputClient.updateEditingStateWithTag"
+                              arguments:@[ @(client), @{tag : state} ]];
 }
 
 - (void)updateFloatingCursor:(FlutterFloatingCursorDragState)state
@@ -501,6 +603,13 @@
                               arguments:@[ @(client), actionString ]];
 }
 
+- (void)showAutocorrectionPromptRectForStart:(NSUInteger)start
+                                         end:(NSUInteger)end
+                                  withClient:(int)client {
+  [_textInputChannel.get() invokeMethod:@"TextInputClient.showAutocorrectionPromptRect"
+                              arguments:@[ @(client), @(start), @(end) ]];
+}
+
 #pragma mark - Screenshot Delegate
 
 - (flutter::Rasterizer::Screenshot)takeScreenshot:(flutter::Rasterizer::ScreenshotType)type
@@ -522,7 +631,9 @@
 - (void)sendOnChannel:(NSString*)channel
               message:(NSData*)message
           binaryReply:(FlutterBinaryReply)callback {
-  NSAssert(channel, @"The channel must not be null");
+  NSParameterAssert(channel);
+  NSAssert(_shell && _shell->IsSetup(),
+           @"Sending a message before the FlutterEngine has been run.");
   fml::RefPtr<flutter::PlatformMessageResponseDarwin> response =
       (callback == nil) ? nullptr
                         : fml::MakeRefCounted<flutter::PlatformMessageResponseDarwin>(
@@ -540,8 +651,9 @@
 
 - (void)setMessageHandlerOnChannel:(NSString*)channel
               binaryMessageHandler:(FlutterBinaryMessageHandler)handler {
-  NSAssert(channel, @"The channel must not be null");
-  FML_DCHECK(_shell && _shell->IsSetup());
+  NSParameterAssert(channel);
+  NSAssert(_shell && _shell->IsSetup(),
+           @"Setting a message handler before the FlutterEngine has been run.");
   self.iosPlatformView->GetPlatformMessageRouter().SetMessageHandler(channel.UTF8String, handler);
 }
 
@@ -578,7 +690,10 @@
 - (NSObject<FlutterPluginRegistrar>*)registrarForPlugin:(NSString*)pluginKey {
   NSAssert(self.pluginPublications[pluginKey] == nil, @"Duplicate plugin key: %@", pluginKey);
   self.pluginPublications[pluginKey] = [NSNull null];
-  return [[[FlutterEngineRegistrar alloc] initWithPlugin:pluginKey flutterEngine:self] autorelease];
+  FlutterEngineRegistrar* result = [[FlutterEngineRegistrar alloc] initWithPlugin:pluginKey
+                                                                    flutterEngine:self];
+  self.registrars[pluginKey] = result;
+  return [result autorelease];
 }
 
 - (BOOL)hasPlugin:(NSString*)pluginKey {
@@ -589,7 +704,15 @@
   return _pluginPublications[pluginKey];
 }
 
-#pragma mark - Memory Notifications
+#pragma mark - Notifications
+
+- (void)applicationBecameActive:(NSNotification*)notification {
+  [self setIsGpuDisabled:NO];
+}
+
+- (void)applicationWillResignActive:(NSNotification*)notification {
+  [self setIsGpuDisabled:YES];
+}
 
 - (void)onMemoryWarning:(NSNotification*)notification {
   if (_shell) {
@@ -598,24 +721,71 @@
   [_systemChannel sendMessage:@{@"type" : @"memoryPressure"}];
 }
 
+- (void)setIsGpuDisabled:(BOOL)value {
+  if (_shell) {
+    _shell->GetIsGpuDisabledSyncSwitch()->SetSwitch(value ? true : false);
+  }
+  _isGpuDisabled = value;
+}
+
+#pragma mark - Locale updates
+
+- (void)onLocaleUpdated:(NSNotification*)notification {
+  NSArray<NSString*>* preferredLocales = [NSLocale preferredLanguages];
+  NSMutableArray<NSString*>* data = [[NSMutableArray new] autorelease];
+
+  // Force prepend the [NSLocale currentLocale] to the front of the list
+  // to ensure we are including the full default locale. preferredLocales
+  // is not guaranteed to include anything beyond the languageCode.
+  NSLocale* currentLocale = [NSLocale currentLocale];
+  NSString* languageCode = [currentLocale objectForKey:NSLocaleLanguageCode];
+  NSString* countryCode = [currentLocale objectForKey:NSLocaleCountryCode];
+  NSString* scriptCode = [currentLocale objectForKey:NSLocaleScriptCode];
+  NSString* variantCode = [currentLocale objectForKey:NSLocaleVariantCode];
+  if (languageCode) {
+    [data addObject:languageCode];
+    [data addObject:(countryCode ? countryCode : @"")];
+    [data addObject:(scriptCode ? scriptCode : @"")];
+    [data addObject:(variantCode ? variantCode : @"")];
+  }
+
+  // Add any secondary locales/languages to the list.
+  for (NSString* localeID in preferredLocales) {
+    NSLocale* currentLocale = [[[NSLocale alloc] initWithLocaleIdentifier:localeID] autorelease];
+    NSString* languageCode = [currentLocale objectForKey:NSLocaleLanguageCode];
+    NSString* countryCode = [currentLocale objectForKey:NSLocaleCountryCode];
+    NSString* scriptCode = [currentLocale objectForKey:NSLocaleScriptCode];
+    NSString* variantCode = [currentLocale objectForKey:NSLocaleVariantCode];
+    if (!languageCode) {
+      continue;
+    }
+    [data addObject:languageCode];
+    [data addObject:(countryCode ? countryCode : @"")];
+    [data addObject:(scriptCode ? scriptCode : @"")];
+    [data addObject:(variantCode ? variantCode : @"")];
+  }
+  if (data.count == 0) {
+    return;
+  }
+  [self.localizationChannel invokeMethod:@"setLocale" arguments:data];
+}
+
 @end
 
 @implementation FlutterEngineRegistrar {
   NSString* _pluginKey;
-  FlutterEngine* _flutterEngine;
 }
 
 - (instancetype)initWithPlugin:(NSString*)pluginKey flutterEngine:(FlutterEngine*)flutterEngine {
   self = [super init];
   NSAssert(self, @"Super init cannot be nil");
-  _pluginKey = [pluginKey retain];
-  _flutterEngine = [flutterEngine retain];
+  _pluginKey = [pluginKey copy];
+  _flutterEngine = flutterEngine;
   return self;
 }
 
 - (void)dealloc {
   [_pluginKey release];
-  [_flutterEngine release];
   [super dealloc];
 }
 
@@ -657,7 +827,17 @@
 
 - (void)registerViewFactory:(NSObject<FlutterPlatformViewFactory>*)factory
                      withId:(NSString*)factoryId {
-  [_flutterEngine platformViewsController] -> RegisterViewFactory(factory, factoryId);
+  [self registerViewFactory:factory
+                                withId:factoryId
+      gestureRecognizersBlockingPolicy:FlutterPlatformViewGestureRecognizersBlockingPolicyEager];
+}
+
+- (void)registerViewFactory:(NSObject<FlutterPlatformViewFactory>*)factory
+                              withId:(NSString*)factoryId
+    gestureRecognizersBlockingPolicy:
+        (FlutterPlatformViewGestureRecognizersBlockingPolicy)gestureRecognizersBlockingPolicy {
+  [_flutterEngine platformViewsController]->RegisterViewFactory(factory, factoryId,
+                                                                gestureRecognizersBlockingPolicy);
 }
 
 @end

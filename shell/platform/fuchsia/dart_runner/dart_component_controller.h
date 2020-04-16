@@ -2,8 +2,8 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
-#ifndef TOPAZ_RUNTIME_DART_RUNNER_DART_COMPONENT_CONTROLLER_H_
-#define TOPAZ_RUNTIME_DART_RUNNER_DART_COMPONENT_CONTROLLER_H_
+#ifndef FLUTTER_SHELL_PLATFORM_FUCHSIA_DART_RUNNER_DART_COMPONENT_CONTROLLER_H_
+#define FLUTTER_SHELL_PLATFORM_FUCHSIA_DART_RUNNER_DART_COMPONENT_CONTROLLER_H_
 
 #include <memory>
 
@@ -16,7 +16,7 @@
 #include <lib/zx/timer.h>
 
 #include "lib/fidl/cpp/binding.h"
-#include "mapped_resource.h"
+#include "runtime/dart/utils/mapped_resource.h"
 #include "third_party/dart/runtime/include/dart_api.h"
 
 namespace dart_runner {
@@ -42,9 +42,7 @@ class DartComponentController : public fuchsia::sys::ComponentController {
   bool SetupFromAppSnapshot();
 
   bool CreateIsolate(const uint8_t* isolate_snapshot_data,
-                     const uint8_t* isolate_snapshot_instructions,
-                     const uint8_t* shared_snapshot_data,
-                     const uint8_t* shared_snapshot_instructions);
+                     const uint8_t* isolate_snapshot_instructions);
 
   int SetupFileDescriptor(fuchsia::sys::FileDescriptorPtr fd);
 
@@ -74,11 +72,10 @@ class DartComponentController : public fuchsia::sys::ComponentController {
   fdio_ns_t* namespace_ = nullptr;
   int stdoutfd_ = -1;
   int stderrfd_ = -1;
-  MappedResource isolate_snapshot_data_;
-  MappedResource isolate_snapshot_instructions_;
-  MappedResource shared_snapshot_data_;
-  MappedResource shared_snapshot_instructions_;
-  std::vector<MappedResource> kernel_peices_;
+  dart_utils::ElfSnapshot elf_snapshot_;                      // AOT snapshot
+  dart_utils::MappedResource isolate_snapshot_data_;          // JIT snapshot
+  dart_utils::MappedResource isolate_snapshot_instructions_;  // JIT snapshot
+  std::vector<dart_utils::MappedResource> kernel_peices_;
 
   Dart_Isolate isolate_;
   int32_t return_code_ = 0;
@@ -96,4 +93,4 @@ class DartComponentController : public fuchsia::sys::ComponentController {
 
 }  // namespace dart_runner
 
-#endif  // TOPAZ_RUNTIME_DART_RUNNER_DART_COMPONENT_CONTROLLER_H_
+#endif  // FLUTTER_SHELL_PLATFORM_FUCHSIA_DART_RUNNER_DART_COMPONENT_CONTROLLER_H_

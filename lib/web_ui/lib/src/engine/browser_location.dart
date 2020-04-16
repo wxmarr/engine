@@ -2,34 +2,17 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+// @dart = 2.6
 part of engine;
 
 // TODO(mdebbar): add other strategies.
 
 // Some parts of this file were inspired/copied from the AngularDart router.
 
-/// Ensures that [str] is prefixed with [leading]. If [str] is already prefixed,
-/// it'll be returned unchanged. If it's not, this function will prefix it.
+/// [LocationStrategy] is responsible for representing and reading route state
+/// from the browser's URL.
 ///
-/// The [applyWhenEmpty] flag controls whether this function should prefix [str]
-/// or not when it's an empty string.
-///
-/// ```dart
-/// ensureLeading('/path', '/'); // "/path"
-/// ensureLeading('path', '/'); // "/path"
-/// ensureLeading('', '/'); // "/"
-/// ensureLeading('', '/', applyWhenEmpty: false); // ""
-/// ```
-String ensureLeading(String str, String leading, {bool applyWhenEmpty = true}) {
-  if (str.isEmpty && !applyWhenEmpty) {
-    return str;
-  }
-  return str.startsWith(leading) ? str : '$leading$str';
-}
-
-/// `LocationStrategy` is responsible for representing and reading route state
-/// from the browser's URL. At the moment, only one strategy is implemented:
-/// [HashLocationStrategy].
+/// At the moment, only one strategy is implemented: [HashLocationStrategy].
 ///
 /// This is used by [BrowserHistory] to interact with browser history APIs.
 abstract class LocationStrategy {
@@ -61,14 +44,14 @@ abstract class LocationStrategy {
 /// to represent its state.
 ///
 /// In order to use this [LocationStrategy] for an app, it needs to be set in
-/// [ui.window.webOnlyLocationStrategy]:
+/// [ui.window.locationStrategy]:
 ///
 /// ```dart
 /// import 'package:flutter_web/material.dart';
 /// import 'package:flutter_web/ui.dart' as ui;
 ///
 /// void main() {
-///   ui.window.webOnlyLocationStrategy = const ui.HashLocationStrategy();
+///   ui.window.locationStrategy = const ui.HashLocationStrategy();
 ///   runApp(MyApp());
 /// }
 /// ```
@@ -89,12 +72,11 @@ class HashLocationStrategy extends LocationStrategy {
     // the hash value is always prefixed with a `#`
     // and if it is empty then it will stay empty
     String path = _platformLocation.hash ?? '';
+    assert(path.isEmpty || path.startsWith('#'));
     // Dart will complain if a call to substring is
     // executed with a position value that exceeds the
     // length of string.
-    path = path.isEmpty ? path : path.substring(1);
-    // The path, by convention, should always contain a leading '/'.
-    return ensureLeading(path, '/');
+    return path.isEmpty ? path : path.substring(1);
   }
 
   @override
@@ -124,8 +106,10 @@ class HashLocationStrategy extends LocationStrategy {
     return _waitForPopState();
   }
 
-  /// Waits until the next popstate event is fired. This is useful for example
-  /// to wait until the browser has handled the `history.back` transition.
+  /// Waits until the next popstate event is fired.
+  ///
+  /// This is useful for example to wait until the browser has handled the
+  /// `history.back` transition.
   Future<void> _waitForPopState() {
     final Completer<void> completer = Completer<void>();
     ui.VoidCallback unsubscribe;
@@ -137,10 +121,10 @@ class HashLocationStrategy extends LocationStrategy {
   }
 }
 
-/// `PlatformLocation` encapsulates all calls to DOM apis, which allows the
+/// [PlatformLocation] encapsulates all calls to DOM apis, which allows the
 /// [LocationStrategy] classes to be platform agnostic and testable.
 ///
-/// The `PlatformLocation` class is used directly by all implementations of
+/// The [PlatformLocation] class is used directly by all implementations of
 /// [LocationStrategy] when they need to interact with the DOM apis like
 /// pushState, popState, etc...
 abstract class PlatformLocation {

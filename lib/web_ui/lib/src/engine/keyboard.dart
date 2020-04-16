@@ -2,7 +2,9 @@
 // Use of this source code is governed by a BSD-style license that can be
 // found in the LICENSE file.
 
+// @dart = 2.6
 part of engine;
+
 
 /// Provides keyboard bindings, such as the `flutter/keyevent` channel.
 class Keyboard {
@@ -50,30 +52,61 @@ class Keyboard {
   static const JSONMessageCodec _messageCodec = JSONMessageCodec();
 
   void _handleHtmlEvent(html.KeyboardEvent event) {
-    final Map<String, dynamic> eventData = <String, dynamic>{
-      'type': event.type,
-      // TODO(yjbanov): this emulates Android because that the only reasonable
-      //                thing to map to right now (the other choice is fuchsia).
-      //                However, eventually we need to have something that maps
-      //                better to Web.
-      'keymap': 'android',
-      'keyCode': event.keyCode,
-    };
-
-    // TODO(yjbanov): The browser does not report `charCode` for 'keydown' and
-    //                'keyup', only for 'keypress'. This restores the value
-    //                from the 'key' field. However, we need to verify how
-    //                many code units a single key can have. Right now it
-    //                assumes exactly one unit (that's what Flutter framework
-    //                expects). But we'll need a different strategy if other
-    //                code unit counts are possible.
-    if (event.key.codeUnits.length == 1) {
-      eventData['codePoint'] = event.key.codeUnits.first;
+    if (window._onPlatformMessage == null) {
+      return;
     }
 
-    ui.window.onPlatformMessage('flutter/keyevent',
+    if (_shouldPreventDefault(event)) {
+      event.preventDefault();
+    }
+
+    final Map<String, dynamic> eventData = <String, dynamic>{
+      'type': event.type,
+      'keymap': 'web',
+      'code': event.code,
+      'key': event.key,
+      'metaState': _getMetaState(event),
+    };
+
+    window.invokeOnPlatformMessage('flutter/keyevent',
         _messageCodec.encodeMessage(eventData), _noopCallback);
   }
+
+  bool _shouldPreventDefault(html.KeyboardEvent event) {
+    switch (event.key) {
+      case 'Tab':
+        return true;
+
+      default:
+        return false;
+    }
+  }
+}
+
+const int _modifierNone = 0x00;
+const int _modifierShift = 0x01;
+const int _modifierAlt = 0x02;
+const int _modifierControl = 0x04;
+const int _modifierMeta = 0x08;
+
+/// Creates a bitmask representing the meta state of the [event].
+int _getMetaState(html.KeyboardEvent event) {
+  int metaState = _modifierNone;
+  if (event.getModifierState('Shift')) {
+    metaState |= _modifierShift;
+  }
+  if (event.getModifierState('Alt')) {
+    metaState |= _modifierAlt;
+  }
+  if (event.getModifierState('Control')) {
+    metaState |= _modifierControl;
+  }
+  if (event.getModifierState('Meta')) {
+    metaState |= _modifierMeta;
+  }
+  // TODO: Re-enable lock key modifiers once there is support on Flutter
+  // Framework. https://github.com/flutter/flutter/issues/46718
+  return metaState;
 }
 
 void _noopCallback(ByteData data) {}

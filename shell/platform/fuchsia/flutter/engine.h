@@ -5,6 +5,7 @@
 #ifndef FLUTTER_SHELL_PLATFORM_FUCHSIA_ENGINE_H_
 #define FLUTTER_SHELL_PLATFORM_FUCHSIA_ENGINE_H_
 
+#include <fuchsia/intl/cpp/fidl.h>
 #include <fuchsia/io/cpp/fidl.h>
 #include <fuchsia/ui/gfx/cpp/fidl.h>
 #include <fuchsia/ui/views/cpp/fidl.h>
@@ -31,9 +32,9 @@ class Engine final {
   Engine(Delegate& delegate,
          std::string thread_label,
          std::shared_ptr<sys::ServiceDirectory> svc,
+         std::shared_ptr<sys::ServiceDirectory> runner_services,
          flutter::Settings settings,
          fml::RefPtr<const flutter::DartSnapshot> isolate_snapshot,
-         fml::RefPtr<const flutter::DartSnapshot> shared_snapshot,
          fuchsia::ui::views::ViewToken view_token,
          UniqueFDIONS fdio_ns,
          fidl::InterfaceRequest<fuchsia::io::Directory> directory_request);
@@ -56,6 +57,8 @@ class Engine final {
   std::unique_ptr<flutter::Shell> shell_;
   zx::event vsync_event_;
   fml::WeakPtrFactory<Engine> weak_factory_;
+  // A stub for the FIDL protocol fuchsia.intl.PropertyProvider.
+  fuchsia::intl::PropertyProviderPtr intl_property_provider_;
 
   void OnMainIsolateStart();
 
